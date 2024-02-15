@@ -32,15 +32,40 @@ class Client(AbstractNode):
 
         return int(result)
 
-class Merchant(AbstractNode):
+class Merchant(AbstractNode):       
+        
+    def __init__(self, name: str, server_name: str):
+        self.name = name
+        self.server_name = server_name
+        
+        # RECEIVE -
+        # receives C,k from Client
+        # but C is public. 
+        # so receives only k
+        
+        # SEND - 
+        # sends C, k, M to Bank
+        # But C,M is public
+        # so sends only k
+        
+        
+       
+
     def run(self, context: ProgramContext):
-        connection = context.connection
+    
+    	csocket = context.csockets[self.server_name]
+        connection = context.connection()
+        C = yield from csocket.recv()
+        k = yield from csocket.recv()
+        
+       
+        
+        
+        
 
-        self.qubits[0] = Qubit(connection)
-        result = self.qubits[0].measure()
-        yield from connection.flush()
+        
 
-        return int(result)
+    
 
 
 if __name__ == "__main__":
