@@ -1,6 +1,6 @@
 import numpy as np
-
-from cryptography.hazmat.primitives import hashes, hmac
+import hmac
+import hashlib
 
 from netqasm.sdk.classical_communication.socket import Socket
 from netqasm.sdk.epr_socket import EPRSocket
@@ -14,10 +14,10 @@ from netsquid_netbuilder.modules.qdevices.generic import GenericQDeviceConfig
 from squidasm.run.stack.run import run
 from squidasm.sim.stack.program import ProgramContext
 
+from squidasm.util.util import get_qubit_state
+
 from AbstractNode import AbstractNode
 
-import hmac
-import hashlib
 
 
 def generate_hmac(key, message):
@@ -59,15 +59,18 @@ class Bank(AbstractNode):
 
         basis = np.random.choice([0, 1], KEY_LENGTH)
         value = np.random.choice([0, 1], KEY_LENGTH)
+
         original_basis = "".join(str(r) for r in basis)
         original_value= "".join(str(r) for r in value)
 
         for i, (b, v) in enumerate(zip(basis, value)):
             self.qubits[i] = Qubit(connection)
+
             if v:
                 self.qubits[i].X()
             if b:
                 self.qubits[i].H()
+            yield from connection.flush()
 
             yield from self.teleport_data_send(
                 self.qubits[i], self.peers[0], context, connection)
@@ -92,8 +95,6 @@ class Bank(AbstractNode):
         coincidences =  np.array([
             (b1 == b2) for b1, b2 in zip(measured_basis, original_basis)])
 
-        print(coincidences)
-
         original_basis_array = np.array([i for i in original_basis])
         original_value_array = np.array([i for i in original_value])
         measured_basis_array = np.array([i for i in measured_basis])
@@ -110,8 +111,6 @@ class Bank(AbstractNode):
             for r1, r2 in zip(
                 original_value_array[coincidences],
                 measured_value_array[coincidences])]
-    
-        print(verify_coincidences)
 
         if all(verify_coincidences):
             msg = "Transaction accepted"
@@ -119,7 +118,6 @@ class Bank(AbstractNode):
             msg = "Transaction rejected"
 
         csocket_merchant.send(msg)
-        yield from connection.flush()
 
         return
 
@@ -137,7 +135,6 @@ class Client(AbstractNode):
             self.qubits[i] = yield from self.teleport_data_recv(
                 "Bank", context, connection
                 )
-            # self.qubits[i].rot_Y(1, 2)
 
         hmac = generate_hmac(
             self.shared_secret.encode('ascii'),
@@ -165,22 +162,11 @@ class Client(AbstractNode):
         csocket = context.csockets[self.merchant]
         msg = f"{CLIENT_IDS[self.name]},{result}"
         csocket.send(msg)
-        yield from connection.flush()
 
         return
 
 
 class Merchant(AbstractNode):       
-        # RECEIVE -
-        # receives C,k from Client
-        # but C is public. 
-        # so receives only k
-
-        # SEND - 
-        # sends C, k, M to Bank
-        # But C,M is public
-        # so sends only k
-
     def __init__(self, *args, client: str, **kwargs):
         super().__init__(*args, peers=["Bank", client], **kwargs)
         self.client = client
@@ -204,16 +190,14 @@ class Merchant(AbstractNode):
 
 
 if __name__ == "__main__":
-    num_nodes = 3
-    num_shots = 1
-    num_merchants = 3
+    num_shots = 5
     chosen_client = "Iago"
     chosen_merchant = "Atadana"
 
     global KEY_LENGTH, CLIENT_IDS, MERCHANT_IDS
-    merchants = ["Atadana", "Priya", "Iago"]
-    clients = ["Atadana", "Priya", "Iago"]
-    KEY_LENGTH = 64
+    merchants = ["Atadana", "Priya", "Iago", "Thijs"]
+    clients = ["Atadana", "Priya", "Iago", "Thijs"]
+    KEY_LENGTH = 32
     MERCHANT_IDS = {
         n: ("".join(i for i in np.random.choice(['0', '1'], KEY_LENGTH))) for n in merchants}
     CLIENT_IDS = {
