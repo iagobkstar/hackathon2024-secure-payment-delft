@@ -134,6 +134,7 @@ class AbstractNode(Program):
         epr_socket = context.epr_sockets[source_peer]
 
         # Check if there are available communication qubits and get its index
+        """ BUG """
         available = [q is not None for q in self.qubits].count(True)
         if not available > 0 :
             raise Exception("No communication qubits available")
@@ -159,3 +160,64 @@ class AbstractNode(Program):
         # Free up communication qubit
         comm_qubit = None
         return target_qubit
+
+    def teleport_data_send(
+        self,
+        source_qubit: Qubit,
+        target_peer: str,
+        context: ProgramContext,
+        connection: BaseNetQASMConnection
+    ):
+
+        if not target_peer in self.peers:
+            raise Exception(f"{target_peer} not in {self.peers}")
+
+        csocket = context.csockets[target_peer]
+        epr_socket = context.epr_sockets[target_peer]
+
+        comm_qubit = epr_socket.create_keep()[0]
+        yield from connection.flush()
+
+        source_qubit.cnot(comm_qubit)
+        source_qubit.H()
+
+        r0 = source_qubit.measure()
+        r1 = comm_qubit.measure()
+        yield from connection.flush()
+
+        msg = f"{int(r0)},{int(r1)}"
+        csocket.send(msg)
+        yield from connection.flush()
+
+        source_qubit = None
+        comm_qubit = None
+        return source_qubit
+
+
+    def teleport_data_recv(
+        self,
+        source_peer: str,
+        context: ProgramContext,
+        connection: BaseNetQASMConnection
+    ):
+
+        if not source_peer in self.peers:
+            raise Exception(f"{source_peer} not in {self.peers}")
+
+        csocket = context.csockets[source_peer]
+        epr_socket = context.epr_sockets[source_peer]
+
+        comm_qubit = epr_socket.recv_keep()[0]
+        yield from connection.flush()
+
+        msg = yield from csocket.recv()
+        r0, r1 = msg.split(",")
+
+        if int(r1):
+            comm_qubit.X()
+        if int(r0):
+            comm_qubit.Z()
+
+        yield from connection.flush()
+
+        return comm_qubit
