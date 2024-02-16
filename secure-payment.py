@@ -9,6 +9,7 @@ from netqasm.sdk.qubit import Qubit
 from netsquid_magic.models.perfect import PerfectLinkConfig
 from netsquid_netbuilder.modules.clinks.default import DefaultCLinkConfig
 from netsquid_netbuilder.util.network_generation import create_complete_graph_network
+from netsquid_netbuilder.modules.qdevices.generic import GenericQDeviceConfig
 
 from squidasm.run.stack.run import run
 from squidasm.sim.stack.program import ProgramContext
@@ -58,6 +59,8 @@ class Bank(AbstractNode):
 
         basis = np.random.choice([0, 1], KEY_LENGTH)
         value = np.random.choice([0, 1], KEY_LENGTH)
+        original_basis = "".join(str(r) for r in basis)
+        original_value= "".join(str(r) for r in value)
 
         for i, (b, v) in enumerate(zip(basis, value)):
             self.qubits[i] = Qubit(connection)
@@ -65,13 +68,13 @@ class Bank(AbstractNode):
                 self.qubits[i].X()
             if b:
                 self.qubits[i].H()
-            
+
             yield from self.teleport_data_send(
                 self.qubits[i], self.peers[0], context, connection)
 
         csocket_merchant = context.csockets[self.merchant]
         msg = yield from csocket_merchant.recv()
-        client_id, result, merchant_id = msg.split(",")
+        client_id, measured_value, merchant_id = msg.split(",")
 
         hmac = generate_hmac(
             CLIENT_SHARED_SECRET[client_id].encode('ascii'),
@@ -79,33 +82,46 @@ class Bank(AbstractNode):
         )
 
         if len(hmac) > KEY_LENGTH:
-            basis_verify = hmac[0:KEY_LENGTH]
+            measured_basis = hmac[0:KEY_LENGTH]
         elif len(hmac) < KEY_LENGTH:
             raise Exception(f"len_key > {len(hmac)}")
         else:
-            basis_verify = hmac
+            measured_basis = hmac
 
-        list_coincidences = [int(i) == int(j) for i, j in zip(basis_verify, basis)]
-        print(list_coincidences)
+        measured_basis = "".join(str(r) for r in measured_basis)
+        coincidences =  np.array([
+            (b1 == b2) for b1, b2 in zip(measured_basis, original_basis)])
+
+        print(coincidences)
+
+        original_basis_array = np.array([i for i in original_basis])
+        original_value_array = np.array([i for i in original_value])
+        measured_basis_array = np.array([i for i in measured_basis])
+        measured_value_array = np.array([i for i in measured_value])
+
+        print(f"r1: {original_value} -> {original_value_array[coincidences]}")
+        print(f"b1: {original_basis} -> {original_basis_array[coincidences]}")
+        print(f"r2: {measured_value} -> {measured_value_array[coincidences]}")
+        print(f"b2: {measured_basis} -> {measured_basis_array[coincidences]}")
+        print(f"co: {coincidences}")
 
         verify_coincidences = [
-            int(v) == int(r)
-            for v, r, b1, b2 in zip(value, result, basis, basis_verify)
-            if int(b1) == int(b2)]
+            (r1 == r2)
+            for r1, r2 in zip(
+                original_value_array[coincidences],
+                measured_value_array[coincidences])]
+    
         print(verify_coincidences)
 
-        """ NOT NECESSARY, KEPT FOR ENTANGLEMENT PROTOCOL
-        result_verify = np.zeros(KEY_LENGTH, dtype=int)
-        for i, b in enumerate(basis_verify):
-            self.qubits[i] = Qubit(connection)
-            if b:
-                self.qubits[i].H()
-            res = self.qubits[i].measure()
-            yield from connection.flush()
-            result_verify[i] = res
-        """
+        if all(verify_coincidences):
+            msg = "Transaction accepted"
+        else:
+            msg = "Transaction rejected"
 
-        return value
+        csocket_merchant.send(msg)
+        yield from connection.flush()
+
+        return
 
 
 class Client(AbstractNode):
@@ -121,6 +137,7 @@ class Client(AbstractNode):
             self.qubits[i] = yield from self.teleport_data_recv(
                 "Bank", context, connection
                 )
+            # self.qubits[i].rot_Y(1, 2)
 
         hmac = generate_hmac(
             self.shared_secret.encode('ascii'),
@@ -142,14 +159,15 @@ class Client(AbstractNode):
             yield from connection.flush()
             result[i] = res
 
-        result_str = "".join(str(r) for r in result)
+        result = "".join(str(r) for r in result)
+        basis = "".join(str(r) for r in basis)
 
         csocket = context.csockets[self.merchant]
-        msg = f"{CLIENT_IDS[self.name]},{result_str}"
+        msg = f"{CLIENT_IDS[self.name]},{result}"
         csocket.send(msg)
         yield from connection.flush()
 
-        return result
+        return
 
 
 class Merchant(AbstractNode):       
@@ -179,6 +197,11 @@ class Merchant(AbstractNode):
         csocket_bank.send(msg)
         yield from connection.flush()
 
+        msg = yield from csocket_bank.recv()
+        print(f"Outcome: {msg}")
+
+        return msg
+
 
 if __name__ == "__main__":
     num_nodes = 3
@@ -190,7 +213,7 @@ if __name__ == "__main__":
     global KEY_LENGTH, CLIENT_IDS, MERCHANT_IDS
     merchants = ["Atadana", "Priya", "Iago"]
     clients = ["Atadana", "Priya", "Iago"]
-    KEY_LENGTH = 16
+    KEY_LENGTH = 64
     MERCHANT_IDS = {
         n: ("".join(i for i in np.random.choice(['0', '1'], KEY_LENGTH))) for n in merchants}
     CLIENT_IDS = {
@@ -206,6 +229,7 @@ if __name__ == "__main__":
         PerfectLinkConfig(state_delay=100),
         clink_typ="default",
         clink_cfg=DefaultCLinkConfig(delay=100),
+        qdevice_cfg=GenericQDeviceConfig.perfect_config(num_qubits=KEY_LENGTH),
     )
 
     programs = {
@@ -224,8 +248,4 @@ if __name__ == "__main__":
             client=chosen_client)
         }
 
-    out = run(config=cfg, programs=programs, num_times=num_shots)
-    print(out)
-    # outcomes = ["".join(str(out[i][j]) for i in range(num_nodes)) for j in range(num_shots)]
-
-    # print(outcomes)
+    _, _, _ = run(config=cfg, programs=programs, num_times=num_shots)
