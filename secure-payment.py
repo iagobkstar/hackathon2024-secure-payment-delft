@@ -37,22 +37,27 @@ def generate_hmac(key, message):
     hmac_generator = hmac.new(key, message, hash_function)
 
     # Obtain the HMAC authentication code in binary format
-    hmac_code_binary = bin(int(hmac_generator.hexdigest(), 16))[2:].zfill(8 * (len(hmac_generator.digest()) // 2))
+    hmac_code_binary = bin(int(hmac_generator.hexdigest(), 16))[2:].zfill(4*len(hmac_generator.digest()))
 
     return hmac_code_binary
 
 
+def hex_to_binary(hex_str):
+    # Obtain the HMAC authentication code in binary format
+    return bin(int(hex_str, 16))[2:].zfill(4*len(hex_str))
+
+
 class Bank(AbstractNode):
-    shared_secret = np.array([1, 0, 0, 1])
-    len_key = len(shared_secret)
+    def __init__(self, client: str, merchant: str, *args, **kwargs):
+        super().__init__(*args, peers=[client, merchant], **kwargs)
+        self.client = client
+        self.merchant = merchant
 
     def run(self, context: ProgramContext):
         connection = context.connection
 
-        basis = np.random.choice([0, 1], self.len_key)
-        
-        basis = np.array([1, 0, 0, 0])
-        value = np.random.choice([0, 1], self.len_key)
+        basis = np.random.choice([0, 1], KEY_LENGTH)
+        value = np.random.choice([0, 1], KEY_LENGTH)
 
         for i, (b, v) in enumerate(zip(basis, value)):
             self.qubits[i] = Qubit(connection)
@@ -64,52 +69,85 @@ class Bank(AbstractNode):
             yield from self.teleport_data_send(
                 self.qubits[i], self.peers[0], context, connection)
 
-            self.qubits[i] = Qubit(connection)
-            if v:
-                self.qubits[i].X()
-            if b:
-                self.qubits[i].H()
+        csocket_merchant = context.csockets[self.merchant]
+        msg = yield from csocket_merchant.recv()
+        client_id, result, merchant_id = msg.split(",")
 
-        result = np.zeros(self.len_key)
-        for i, b in enumerate(basis):
+        hmac = generate_hmac(
+            CLIENT_SHARED_SECRET[client_id].encode('ascii'),
+            merchant_id.encode('ascii')
+        )
+
+        if len(hmac) > KEY_LENGTH:
+            basis_verify = hmac[0:KEY_LENGTH]
+        elif len(hmac) < KEY_LENGTH:
+            raise Exception(f"len_key > {len(hmac)}")
+        else:
+            basis_verify = hmac
+
+        list_coincidences = [int(i) == int(j) for i, j in zip(basis_verify, basis)]
+        print(list_coincidences)
+
+        verify_coincidences = [
+            int(v) == int(r)
+            for v, r, b1, b2 in zip(value, result, basis, basis_verify)
+            if int(b1) == int(b2)]
+        print(verify_coincidences)
+
+        """ NOT NECESSARY, KEPT FOR ENTANGLEMENT PROTOCOL
+        result_verify = np.zeros(KEY_LENGTH, dtype=int)
+        for i, b in enumerate(basis_verify):
+            self.qubits[i] = Qubit(connection)
             if b:
                 self.qubits[i].H()
             res = self.qubits[i].measure()
             yield from connection.flush()
-            result[i] = int(res)
+            result_verify[i] = res
+        """
 
-        return result
+        return value
 
 
 class Client(AbstractNode):
-    shared_secret = np.array([1, 0, 0, 1])
-    len_key = len(shared_secret)
+    def __init__(self, merchant, shared_secret, *args, **kwargs):
+        super().__init__(*args, peers=["Bank", merchant], **kwargs)
+        self.merchant = merchant
+        self.shared_secret = shared_secret
 
     def run(self, context: ProgramContext):
         connection = context.connection
 
-        merchant = "Merchant1"
-
-        for i in range(self.len_key):
+        for i in range(KEY_LENGTH):
             self.qubits[i] = yield from self.teleport_data_recv(
                 "Bank", context, connection
                 )
 
-        vendor_id = MERCHANT_IDS[merchant]
-        
         hmac = generate_hmac(
-            self.shared_secret, vendor_id)
-        print(hmac)
+            self.shared_secret.encode('ascii'),
+            MERCHANT_IDS[self.merchant].encode('ascii')
+        )
 
-        """ CHECK """
-        basis = [1, 0, 0, 1]
-        result = np.zeros(self.len_key)
+        if len(hmac) > KEY_LENGTH:
+            basis = hmac[0:KEY_LENGTH]
+        elif len(hmac) < KEY_LENGTH:
+            raise Exception(f"len_key > {len(hmac)}")
+        else:
+            basis = hmac
+
+        result = np.zeros(KEY_LENGTH, dtype=int)
         for i, b in enumerate(basis):
             if b:
                 self.qubits[i].H()
             res = self.qubits[i].measure()
             yield from connection.flush()
-            result[i] = int(res)
+            result[i] = res
+
+        result_str = "".join(str(r) for r in result)
+
+        csocket = context.csockets[self.merchant]
+        msg = f"{CLIENT_IDS[self.name]},{result_str}"
+        csocket.send(msg)
+        yield from connection.flush()
 
         return result
 
@@ -125,30 +163,42 @@ class Merchant(AbstractNode):
         # But C,M is public
         # so sends only k
 
-    def __init__(self, name: str, server_name: str):
-        self.name = name
-        self.server_name = server_name
+    def __init__(self, *args, client: str, **kwargs):
+        super().__init__(*args, peers=["Bank", client], **kwargs)
+        self.client = client
 
     def run(self, context: ProgramContext):
-        csocket = context.csockets[self.server_name]
-        connection = context.connection()
-        C = yield from csocket.recv()
-        k = yield from csocket.recv()
+        connection = context.connection
+        csocket_client = context.csockets[self.client]
+
+        msg = yield from csocket_client.recv()
+        msg += f",{MERCHANT_IDS[self.name]}"
+        # print(msg)
+
+        csocket_bank = context.csockets["Bank"]
+        csocket_bank.send(msg)
+        yield from connection.flush()
 
 
 if __name__ == "__main__":
     num_nodes = 3
     num_shots = 1
     num_merchants = 3
-    len_key = 4
-    chosen_merchant = "Merchant1"
+    chosen_client = "Iago"
+    chosen_merchant = "Atadana"
 
-    global MERCHANT_IDS
-    merchants = [f"Merchant{i}" for i in range(num_merchants)]
-    MERCHANT_IDS = {m: np.random.choice([0, 1], len_key) for m in merchants}
+    global KEY_LENGTH, CLIENT_IDS, MERCHANT_IDS
+    merchants = ["Atadana", "Priya", "Iago"]
+    clients = ["Atadana", "Priya", "Iago"]
+    KEY_LENGTH = 16
+    MERCHANT_IDS = {
+        n: ("".join(i for i in np.random.choice(['0', '1'], KEY_LENGTH))) for n in merchants}
+    CLIENT_IDS = {
+        n: ("".join(i for i in np.random.choice(['0', '1'], KEY_LENGTH))) for n in clients}
+    CLIENT_SHARED_SECRET = {
+        CLIENT_IDS[n]: ("".join(i for i in np.random.choice(['0', '1'], KEY_LENGTH))) for n in CLIENT_IDS.keys()}
 
-    # node_names = ["Bank", "Client"] + merchants
-    node_names = ["Bank", "Client"]
+    node_names = ["Bank", chosen_client, chosen_merchant]
 
     cfg = create_complete_graph_network(
         node_names,
@@ -159,11 +209,20 @@ if __name__ == "__main__":
     )
 
     programs = {
-        "Bank": Bank(name="Bank", peers=["Client"], qubits=len_key),
-        "Client": Client(name="Client", peers=["Bank"], qubits=len_key)
+        "Bank": Bank(
+            name="Bank",
+            client=chosen_client,
+            merchant=chosen_merchant,
+            qubits=KEY_LENGTH),
+        chosen_client: Client(
+            name=chosen_client,
+            merchant=chosen_merchant,
+            shared_secret=CLIENT_SHARED_SECRET[CLIENT_IDS[chosen_client]],
+            qubits=KEY_LENGTH),
+        chosen_merchant: Merchant(
+            name=chosen_merchant,
+            client=chosen_client)
         }
-    # programs.update({
-    #     n: Merchant(len_key=len_key, name=n, peers=["Bank", "Client"], qubits=1) for n in merchants})
 
     out = run(config=cfg, programs=programs, num_times=num_shots)
     print(out)
