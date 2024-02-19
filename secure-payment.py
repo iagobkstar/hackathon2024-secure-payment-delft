@@ -19,7 +19,6 @@ from squidasm.util.util import get_qubit_state
 from AbstractNode import AbstractNode
 
 
-
 def generate_hmac(key, message):
     """
     Generate HMAC authentication code from two strings of bits.
@@ -38,13 +37,14 @@ def generate_hmac(key, message):
     hmac_generator = hmac.new(key, message, hash_function)
 
     # Obtain the HMAC authentication code in binary format
-    hmac_code_binary = bin(int(hmac_generator.hexdigest(), 16))[2:].zfill(4*len(hmac_generator.digest()))
+    hmac_code_binary = bin(
+        int(hmac_generator.hexdigest(), 16))[2:].zfill(4*len(hmac_generator.digest()))
 
     return hmac_code_binary
 
 
 def hex_to_binary(hex_str):
-    # Obtain the HMAC authentication code in binary format
+    # Transform hex string to binary
     return bin(int(hex_str, 16))[2:].zfill(4*len(hex_str))
 
 
@@ -61,11 +61,10 @@ class Bank(AbstractNode):
         value = np.random.choice([0, 1], KEY_LENGTH)
 
         original_basis = "".join(str(r) for r in basis)
-        original_value= "".join(str(r) for r in value)
+        original_value = "".join(str(r) for r in value)
 
         for i, (b, v) in enumerate(zip(basis, value)):
             self.qubits[i] = Qubit(connection)
-
             if v:
                 self.qubits[i].X()
             if b:
@@ -73,7 +72,7 @@ class Bank(AbstractNode):
             yield from connection.flush()
 
             yield from self.teleport_data_send(
-                self.qubits[i], self.peers[0], context, connection)
+                self.qubits[i], self.client, context, connection)
 
         csocket_merchant = context.csockets[self.merchant]
         msg = yield from csocket_merchant.recv()
@@ -95,27 +94,28 @@ class Bank(AbstractNode):
         coincidences =  np.array([
             (b1 == b2) for b1, b2 in zip(measured_basis, original_basis)])
 
-        original_basis_array = np.array([i for i in original_basis])
-        original_value_array = np.array([i for i in original_value])
-        measured_basis_array = np.array([i for i in measured_basis])
-        measured_value_array = np.array([i for i in measured_value])
+        print(f"Basis bank:\t{original_basis}")
+        print(f"Basis client:\t{measured_basis}")
+        print(f"Value bank:\t{original_value}")
+        print(f"Value client:\t{measured_value}")
+        print(f"Coincidences:\t{''.join(str(int(r)) for r in coincidences)}")
 
-        print(f"r1: {original_value} -> {original_value_array[coincidences]}")
-        print(f"b1: {original_basis} -> {original_basis_array[coincidences]}")
-        print(f"r2: {measured_value} -> {measured_value_array[coincidences]}")
-        print(f"b2: {measured_basis} -> {measured_basis_array[coincidences]}")
-        print(f"co: {coincidences}")
+        errors = ''.join(
+            ('0' if (r1 == r2) else '1') if c else ' '
+            for c, r1, r2 in zip(coincidences, original_value, measured_value)
+            )
 
-        verify_coincidences = [
-            (r1 == r2)
-            for r1, r2 in zip(
-                original_value_array[coincidences],
-                measured_value_array[coincidences])]
+        num_errors = errors.count('1')
+        num_success = errors.count('0')
+        error_rate = num_errors/(num_errors+num_success)
+        print(f"Sifted errors:\t{errors}")
 
-        if all(verify_coincidences):
-            msg = "Transaction accepted"
+        global THRESHOLD_REJECT
+        msg = f"\nError rate: {100*error_rate} %"
+        if error_rate < THRESHOLD_REJECT:
+            msg += " -> Transaction accepted"
         else:
-            msg = "Transaction rejected"
+            msg += " -> Transaction rejected"
 
         csocket_merchant.send(msg)
 
@@ -135,6 +135,7 @@ class Client(AbstractNode):
             self.qubits[i] = yield from self.teleport_data_recv(
                 "Bank", context, connection
                 )
+            self.qubits[i].rot_Y(1, 3)
 
         hmac = generate_hmac(
             self.shared_secret.encode('ascii'),
@@ -149,8 +150,9 @@ class Client(AbstractNode):
             basis = hmac
 
         result = np.zeros(KEY_LENGTH, dtype=int)
+
         for i, b in enumerate(basis):
-            if b:
+            if int(b):
                 self.qubits[i].H()
             res = self.qubits[i].measure()
             yield from connection.flush()
@@ -177,33 +179,37 @@ class Merchant(AbstractNode):
 
         msg = yield from csocket_client.recv()
         msg += f",{MERCHANT_IDS[self.name]}"
-        # print(msg)
 
         csocket_bank = context.csockets["Bank"]
         csocket_bank.send(msg)
         yield from connection.flush()
 
         msg = yield from csocket_bank.recv()
-        print(f"Outcome: {msg}")
+        print(f"{msg}")
 
         return msg
 
 
 if __name__ == "__main__":
-    num_shots = 5
+    global KEY_LENGTH, CLIENT_IDS, MERCHANT_IDS, THRESHOLD_REJECT
+    num_shots = 1
+    KEY_LENGTH = 100
+    THRESHOLD_REJECT = 0.05
+
     chosen_client = "Iago"
     chosen_merchant = "Atadana"
 
-    global KEY_LENGTH, CLIENT_IDS, MERCHANT_IDS
     merchants = ["Atadana", "Priya", "Iago", "Thijs"]
     clients = ["Atadana", "Priya", "Iago", "Thijs"]
-    KEY_LENGTH = 32
+
+    # Randomly generate 
     MERCHANT_IDS = {
-        n: ("".join(i for i in np.random.choice(['0', '1'], KEY_LENGTH))) for n in merchants}
+        n: ("".join(i for i in np.random.choice(['0', '1'], 128))) for n in merchants}
     CLIENT_IDS = {
-        n: ("".join(i for i in np.random.choice(['0', '1'], KEY_LENGTH))) for n in clients}
+        n: ("".join(i for i in np.random.choice(['0', '1'], 128))) for n in clients}
     CLIENT_SHARED_SECRET = {
-        CLIENT_IDS[n]: ("".join(i for i in np.random.choice(['0', '1'], KEY_LENGTH))) for n in CLIENT_IDS.keys()}
+        CLIENT_IDS[n]: ("".join(i for i in np.random.choice(['0', '1'], KEY_LENGTH)))
+        for n in CLIENT_IDS.keys()}
 
     node_names = ["Bank", chosen_client, chosen_merchant]
 
@@ -232,4 +238,4 @@ if __name__ == "__main__":
             client=chosen_client)
         }
 
-    _, _, _ = run(config=cfg, programs=programs, num_times=num_shots)
+    _, _, out = run(config=cfg, programs=programs, num_times=num_shots)

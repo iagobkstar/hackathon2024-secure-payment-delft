@@ -3,6 +3,7 @@ from typing import List
 
 from netqasm.sdk.connection import BaseNetQASMConnection
 from netqasm.sdk.qubit import Qubit
+from squidasm.util.util import get_qubit_state
 
 from squidasm.sim.stack.program import Program, ProgramContext, ProgramMeta
 
@@ -44,6 +45,13 @@ class AbstractNode(Program):
     @abstractmethod
     def run(self, context: ProgramContext):
         raise NotImplementedError(str(self.__class__) + " must be extended to run program")
+
+    def get_qubit_state(self, index, *args, **kwargs):
+        """ Retrieves the underlying quantum state of qubit index in density matrix formalism.
+        """
+        if not isinstance(index, int):
+            raise TypeError(f"index {index} not int")
+        return get_qubit_state(self.qubits[index], self.name, **kwargs)
 
     def generate_epr_send(
         self, 
@@ -187,12 +195,10 @@ class AbstractNode(Program):
 
         msg = f"{int(r0)},{int(r1)}"
         csocket.send(msg)
-        yield from connection.flush()
 
         source_qubit = None
         comm_qubit = None
         return source_qubit
-
 
     def teleport_data_recv(
         self,
