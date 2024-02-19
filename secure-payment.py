@@ -14,8 +14,6 @@ from netsquid_netbuilder.modules.qdevices.generic import GenericQDeviceConfig
 from squidasm.run.stack.run import run
 from squidasm.sim.stack.program import ProgramContext
 
-from squidasm.util.util import get_qubit_state
-
 from AbstractNode import AbstractNode
 
 
@@ -44,11 +42,18 @@ def generate_hmac(key, message):
 
 
 def hex_to_binary(hex_str):
-    # Transform hex string to binary
+    """ Transform hex string to binary """
     return bin(int(hex_str, 16))[2:].zfill(4*len(hex_str))
 
 
 class Bank(AbstractNode):
+    """ Implements functionality of TTP (Trusted Third Party) in quantum secure payment protocol
+    
+    Parameters:
+    - client: str -> Who performs the payment
+    - merchant: str -> To whom the client performs payment
+    """
+
     def __init__(self, client: str, merchant: str, *args, **kwargs):
         super().__init__(*args, peers=[client, merchant], **kwargs)
         self.client = client
@@ -57,12 +62,14 @@ class Bank(AbstractNode):
     def run(self, context: ProgramContext):
         connection = context.connection
 
+        # Randomly generate basis and value of qubits
         basis = np.random.choice([0, 1], KEY_LENGTH)
         value = np.random.choice([0, 1], KEY_LENGTH)
 
         original_basis = "".join(str(r) for r in basis)
         original_value = "".join(str(r) for r in value)
 
+        # Generate qubits and send to client by quantum state teleportation
         for i, (b, v) in enumerate(zip(basis, value)):
             self.qubits[i] = Qubit(connection)
             if v:
@@ -74,15 +81,18 @@ class Bank(AbstractNode):
             yield from self.teleport_data_send(
                 self.qubits[i], self.client, context, connection)
 
+        # Wait for merchant, receive CID, k and MID
         csocket_merchant = context.csockets[self.merchant]
         msg = yield from csocket_merchant.recv()
         client_id, measured_value, merchant_id = msg.split(",")
 
+        # Generate HMAC SHA-256 with shared secret C and MID
         hmac = generate_hmac(
             CLIENT_SHARED_SECRET[client_id].encode('ascii'),
             merchant_id.encode('ascii')
         )
 
+        # Truncate HMAC to required number of qubits and use it as basis
         if len(hmac) > KEY_LENGTH:
             measured_basis = hmac[0:KEY_LENGTH]
         elif len(hmac) < KEY_LENGTH:
@@ -90,6 +100,7 @@ class Bank(AbstractNode):
         else:
             measured_basis = hmac
 
+        # Compare the result of the measurements from the client with the state generated
         measured_basis = "".join(str(r) for r in measured_basis)
         coincidences =  np.array([
             (b1 == b2) for b1, b2 in zip(measured_basis, original_basis)])
@@ -100,6 +111,7 @@ class Bank(AbstractNode):
         print(f"Value client:\t{measured_value}")
         print(f"Coincidences:\t{''.join(str(int(r)) for r in coincidences)}")
 
+        # Calculate error rate
         errors = ''.join(
             ('0' if (r1 == r2) else '1') if c else ' '
             for c, r1, r2 in zip(coincidences, original_value, measured_value)
@@ -110,6 +122,7 @@ class Bank(AbstractNode):
         error_rate = num_errors/(num_errors+num_success)
         print(f"Sifted errors:\t{errors}")
 
+        # Decide whether accept transaction based on the rejection threshold and send to merchant
         global THRESHOLD_REJECT
         msg = f"\nError rate: {100*error_rate} %"
         if error_rate < THRESHOLD_REJECT:
@@ -123,6 +136,13 @@ class Bank(AbstractNode):
 
 
 class Client(AbstractNode):
+    """ Implements functionality of Client in quantum secure payment protocol
+    
+    Parameters:
+    - merchant: str -> To whom the client performs payment
+    - shared_secret: str -> a shared secret known only to the bank and the client
+    """
+
     def __init__(self, merchant, shared_secret, *args, **kwargs):
         super().__init__(*args, peers=["Bank", merchant], **kwargs)
         self.merchant = merchant
@@ -131,17 +151,19 @@ class Client(AbstractNode):
     def run(self, context: ProgramContext):
         connection = context.connection
 
+        # Receive qubits from bank by quantum state teleportation
         for i in range(KEY_LENGTH):
             self.qubits[i] = yield from self.teleport_data_recv(
                 "Bank", context, connection
                 )
-            self.qubits[i].rot_Y(1, 3)
 
+        # Generate HMAC SHA-256 with shared secret C and MID
         hmac = generate_hmac(
             self.shared_secret.encode('ascii'),
             MERCHANT_IDS[self.merchant].encode('ascii')
         )
 
+        # Truncate HMAC to required number of qubits and use it as basis
         if len(hmac) > KEY_LENGTH:
             basis = hmac[0:KEY_LENGTH]
         elif len(hmac) < KEY_LENGTH:
@@ -149,8 +171,8 @@ class Client(AbstractNode):
         else:
             basis = hmac
 
+        # Measure the qubits
         result = np.zeros(KEY_LENGTH, dtype=int)
-
         for i, b in enumerate(basis):
             if int(b):
                 self.qubits[i].H()
@@ -158,9 +180,9 @@ class Client(AbstractNode):
             yield from connection.flush()
             result[i] = res
 
-        result = "".join(str(r) for r in result)
-        basis = "".join(str(r) for r in basis)
 
+        # Send CID and k to merchant
+        result = "".join(str(r) for r in result)
         csocket = context.csockets[self.merchant]
         msg = f"{CLIENT_IDS[self.name]},{result}"
         csocket.send(msg)
@@ -168,22 +190,31 @@ class Client(AbstractNode):
         return
 
 
-class Merchant(AbstractNode):       
+class Merchant(AbstractNode):
+    """ Implements functionality of Client in quantum secure payment protocol
+    
+    Parameters:
+    - client: str -> Who performs the payment
+    """
+
     def __init__(self, *args, client: str, **kwargs):
         super().__init__(*args, peers=["Bank", client], **kwargs)
         self.client = client
 
     def run(self, context: ProgramContext):
         connection = context.connection
+
+        # Communicate with client to receive CID and k
         csocket_client = context.csockets[self.client]
-
         msg = yield from csocket_client.recv()
-        msg += f",{MERCHANT_IDS[self.name]}"
 
+        # Append MID and send information to bank
+        msg += f",{MERCHANT_IDS[self.name]}"
         csocket_bank = context.csockets["Bank"]
         csocket_bank.send(msg)
         yield from connection.flush()
 
+        # Wait for confirmation from bank and print it
         msg = yield from csocket_bank.recv()
         print(f"{msg}")
 
@@ -193,7 +224,7 @@ class Merchant(AbstractNode):
 if __name__ == "__main__":
     global KEY_LENGTH, CLIENT_IDS, MERCHANT_IDS, THRESHOLD_REJECT
     num_shots = 1
-    KEY_LENGTH = 100
+    KEY_LENGTH = 128
     THRESHOLD_REJECT = 0.05
 
     chosen_client = "Iago"

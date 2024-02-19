@@ -9,6 +9,13 @@ from squidasm.sim.stack.program import Program, ProgramContext, ProgramMeta
 
 
 class AbstractNode(Program):
+    """ Abstract class that includes a register of qubits and peers the node is connected to
+
+    Parameters:
+    - name: str -> The name of the node
+    - peers: List[str] -> The nodes that are connected to this node
+    - qubits: int -> The maximum number of qubits that this node can hold
+    """
     def __init__(self, *args, name: str, peers: List[str], qubits: int = 1, **kwargs):
         super().__init__(*args, **kwargs)
         self._name = name
@@ -59,6 +66,8 @@ class AbstractNode(Program):
         context: ProgramContext,
         connection: BaseNetQASMConnection
     ):
+        """ Wrapper for epr_socket.create_keep()
+        """
 
         if not target_peer in self.peers:
             raise Exception(f"{target_peer} not in {self.peers}")
@@ -76,6 +85,8 @@ class AbstractNode(Program):
         context: ProgramContext,
         connection: BaseNetQASMConnection
     ):
+        """ Wrapper for epr_socket.recv_keep()
+        """
 
         if not source_peer in self.peers:
             raise Exception(f"{source_peer} not in {self.peers}")
@@ -94,6 +105,14 @@ class AbstractNode(Program):
         context: ProgramContext,
         connection: BaseNetQASMConnection
     ):
+        """ Perform a distributed CNOT gate as source
+
+        Parameters:
+        - source_qubit: Qubit -> The qubit that is used as control source from local node
+        - target_peer: str -> The connected node that will receive the control. The qubit it will
+                              be applied upon will be decided by the target peer
+        """
+
         if not target_peer in self.peers:
             raise Exception(f"{target_peer} not in {self.peers}")
 
@@ -134,6 +153,12 @@ class AbstractNode(Program):
         context: ProgramContext,
         connection: BaseNetQASMConnection
     ):
+        """ Perform a distributed CNOT gate as target
+
+        Parameters:
+        - target_qubit: Qubit -> The qubit upon which the control will be performed from local node
+        - target_peer: str -> The connected node that will be the source of control
+        """
 
         if not source_peer in self.peers:
             raise Exception(f"{source_peer} not in {self.peers}")
@@ -142,7 +167,6 @@ class AbstractNode(Program):
         epr_socket = context.epr_sockets[source_peer]
 
         # Check if there are available communication qubits and get its index
-        """ BUG """
         available = [q is not None for q in self.qubits].count(True)
         if not available > 0 :
             raise Exception("No communication qubits available")
@@ -176,6 +200,12 @@ class AbstractNode(Program):
         context: ProgramContext,
         connection: BaseNetQASMConnection
     ):
+        """ Perform a teledata operation (teleport the state of a qubit)
+
+        Parameters:
+        - source_qubit: Qubit -> The qubit that is used as control source from local node
+        - target_peer: str -> The connected node that will receive the teleported qubit
+        """
 
         if not target_peer in self.peers:
             raise Exception(f"{target_peer} not in {self.peers}")
@@ -206,6 +236,14 @@ class AbstractNode(Program):
         context: ProgramContext,
         connection: BaseNetQASMConnection
     ):
+        """ Perform a teledata operation (teleport the state of a qubit)
+
+        Parameters:
+        - source_peer: str -> The connected node that will send the teleported qubit
+
+        Returns:
+        - qubit: Qubit
+        """
 
         if not source_peer in self.peers:
             raise Exception(f"{source_peer} not in {self.peers}")
