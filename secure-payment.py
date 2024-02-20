@@ -58,7 +58,7 @@ class Bank(AbstractNode):
     def run(self, context: ProgramContext):
         self.context = context
 
-        # Randomly generate basis and value of qubits
+        # Randomly generate basis and value of qubitsf
         basis = np.random.choice([0, 1], KEY_LENGTH)
         value = np.random.choice([0, 1], KEY_LENGTH)
 
