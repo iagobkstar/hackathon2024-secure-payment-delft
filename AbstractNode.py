@@ -49,61 +49,81 @@ class AbstractNode(Program):
     def qubits(self) -> List[Qubit]:
         return self._qubits
 
+    @property
+    def connection(self):
+        return self._connection
+
+    @property
+    def context(self):
+        return self._context
+
+    @context.setter
+    def context(self, context: ProgramContext):
+        if isinstance(context, ProgramContext):
+            self._context = context
+            self._connection = self._context.connection
+
+    @property
+    def csockets(self):
+        return self.context.csockets
+
+    @property
+    def epr_sockets(self):
+        return self.context.epr_sockets
+
     @abstractmethod
     def run(self, context: ProgramContext):
         raise NotImplementedError(str(self.__class__) + " must be extended to run program")
 
+    def flush(self):
+        return self.connection.flush()
+
+    def init_qubit(self, index=None, *args, **kwargs):
+        """ Initialize a new qubit at index with state |0> """
+        self.qubits[index] = Qubit(self.connection, *args, **kwargs)
+
     def get_qubit_state(self, index, *args, **kwargs):
-        """ Retrieves the underlying quantum state of qubit index in density matrix formalism.
-        """
+        """ Retrieves the underlying quantum state of qubit index in density matrix formalism """
         if not isinstance(index, int):
             raise TypeError(f"index {index} not int")
         return get_qubit_state(self.qubits[index], self.name, **kwargs)
 
     def generate_epr_send(
         self, 
-        target_peer: str,
-        context: ProgramContext,
-        connection: BaseNetQASMConnection
+        target_peer: str
     ):
-        """ Wrapper for epr_socket.create_keep()
-        """
+        """ Wrapper for epr_socket.create_keep() """
 
         if not target_peer in self.peers:
             raise Exception(f"{target_peer} not in {self.peers}")
 
-        epr_socket = context.epr_sockets[target_peer]
+        epr_socket = self.context.epr_sockets[target_peer]
 
         qubit = epr_socket.create_keep()[0]
-        yield from connection.flush()
+        yield from self.connection.flush()
 
         return qubit
 
     def generate_epr_recv(
         self, 
-        source_peer: str,
-        context: ProgramContext,
-        connection: BaseNetQASMConnection
+        source_peer: str
     ):
-        """ Wrapper for epr_socket.recv_keep()
-        """
+        """ Wrapper for epr_socket.recv_keep() """
 
         if not source_peer in self.peers:
             raise Exception(f"{source_peer} not in {self.peers}")
 
-        epr_socket = context.epr_sockets[source_peer]
+        epr_socket = self.context.epr_sockets[source_peer]
 
         qubit = epr_socket.recv_keep()[0]
-        yield from connection.flush()
+        yield from self.connection.flush()
 
         return qubit
 
     def distributed_cnot_source(
         self,
         source_qubit: Qubit,
-        target_peer: str,
-        context: ProgramContext,
-        connection: BaseNetQASMConnection
+        target_peer: str
     ):
         """ Perform a distributed CNOT gate as source
 
@@ -116,8 +136,8 @@ class AbstractNode(Program):
         if not target_peer in self.peers:
             raise Exception(f"{target_peer} not in {self.peers}")
 
-        csocket = context.csockets[target_peer]
-        epr_socket = context.epr_sockets[target_peer]
+        csocket = self.context.csockets[target_peer]
+        epr_socket = self.context.epr_sockets[target_peer]
 
         # Check if there are available communication qubits and get its index
         available = [q is not None for q in self.qubits].count(True)
@@ -130,17 +150,17 @@ class AbstractNode(Program):
         # ___________________ REMOTE CNOT PROTOCOL ___________________
         source_qubit.cnot(comm_qubit)
         local_meas = comm_qubit.measure()
-        yield from connection.flush()
+        yield from self.connection.flush()
 
         # Send result of local measurement
         csocket.send(f"{int(local_meas)}")
-        yield from connection.flush()
+        yield from self.connection.flush()
 
         # Receive result of remote measurement and apply Z gate if True
         rem_meas = yield from csocket.recv()
         if int(rem_meas):
             source_qubit.Z()
-        yield from connection.flush()
+        yield from self.connection.flush()
 
         # Free up communication qubit
         comm_qubit = None
@@ -149,9 +169,7 @@ class AbstractNode(Program):
     def distributed_cnot_target(
         self,
         target_qubit: Qubit,
-        source_peer: str,
-        context: ProgramContext,
-        connection: BaseNetQASMConnection
+        source_peer: str
     ):
         """ Perform a distributed CNOT gate as target
 
@@ -163,8 +181,8 @@ class AbstractNode(Program):
         if not source_peer in self.peers:
             raise Exception(f"{source_peer} not in {self.peers}")
 
-        csocket = context.csockets[source_peer]
-        epr_socket = context.epr_sockets[source_peer]
+        csocket = self.context.csockets[source_peer]
+        epr_socket = self.context.epr_sockets[source_peer]
 
         # Check if there are available communication qubits and get its index
         available = [q is not None for q in self.qubits].count(True)
@@ -178,16 +196,16 @@ class AbstractNode(Program):
         comm_qubit.cnot(target_qubit)
         comm_qubit.H()
         local_meas = comm_qubit.measure()
-        yield from connection.flush()
+        yield from self.connection.flush()
     
         # Receive result of remote measurement and apply X gate if True
         rem_meas = yield from csocket.recv()
         if int(rem_meas):
             target_qubit.X()
-        yield from connection.flush()
+        yield from self.connection.flush()
 
         csocket.send(f"{int(local_meas)}")
-        yield from connection.flush()
+        yield from self.connection.flush()
 
         # Free up communication qubit
         comm_qubit = None
@@ -196,9 +214,7 @@ class AbstractNode(Program):
     def teleport_data_send(
         self,
         source_qubit: Qubit,
-        target_peer: str,
-        context: ProgramContext,
-        connection: BaseNetQASMConnection
+        target_peer: str
     ):
         """ Perform a teledata operation (teleport the state of a qubit)
 
@@ -210,18 +226,18 @@ class AbstractNode(Program):
         if not target_peer in self.peers:
             raise Exception(f"{target_peer} not in {self.peers}")
 
-        csocket = context.csockets[target_peer]
-        epr_socket = context.epr_sockets[target_peer]
+        csocket = self.context.csockets[target_peer]
+        epr_socket = self.context.epr_sockets[target_peer]
 
         comm_qubit = epr_socket.create_keep()[0]
-        yield from connection.flush()
+        yield from self.connection.flush()
 
         source_qubit.cnot(comm_qubit)
         source_qubit.H()
 
         r0 = source_qubit.measure()
         r1 = comm_qubit.measure()
-        yield from connection.flush()
+        yield from self.connection.flush()
 
         msg = f"{int(r0)},{int(r1)}"
         csocket.send(msg)
@@ -232,9 +248,7 @@ class AbstractNode(Program):
 
     def teleport_data_recv(
         self,
-        source_peer: str,
-        context: ProgramContext,
-        connection: BaseNetQASMConnection
+        source_peer: str
     ):
         """ Perform a teledata operation (teleport the state of a qubit)
 
@@ -248,11 +262,11 @@ class AbstractNode(Program):
         if not source_peer in self.peers:
             raise Exception(f"{source_peer} not in {self.peers}")
 
-        csocket = context.csockets[source_peer]
-        epr_socket = context.epr_sockets[source_peer]
+        csocket = self.context.csockets[source_peer]
+        epr_socket = self.context.epr_sockets[source_peer]
 
         comm_qubit = epr_socket.recv_keep()[0]
-        yield from connection.flush()
+        yield from self.connection.flush()
 
         msg = yield from csocket.recv()
         r0, r1 = msg.split(",")
@@ -262,6 +276,6 @@ class AbstractNode(Program):
         if int(r0):
             comm_qubit.Z()
 
-        yield from connection.flush()
+        yield from self.connection.flush()
 
         return comm_qubit

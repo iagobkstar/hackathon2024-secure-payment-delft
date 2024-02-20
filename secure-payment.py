@@ -2,10 +2,6 @@ import numpy as np
 import hmac
 import hashlib
 
-from netqasm.sdk.classical_communication.socket import Socket
-from netqasm.sdk.epr_socket import EPRSocket
-from netqasm.sdk.qubit import Qubit
-
 from netsquid_magic.models.perfect import PerfectLinkConfig
 from netsquid_netbuilder.modules.clinks.default import DefaultCLinkConfig
 from netsquid_netbuilder.util.network_generation import create_complete_graph_network
@@ -48,7 +44,7 @@ def hex_to_binary(hex_str):
 
 class Bank(AbstractNode):
     """ Implements functionality of TTP (Trusted Third Party) in quantum secure payment protocol
-    
+
     Parameters:
     - client: str -> Who performs the payment
     - merchant: str -> To whom the client performs payment
@@ -60,9 +56,9 @@ class Bank(AbstractNode):
         self.merchant = merchant
 
     def run(self, context: ProgramContext):
-        connection = context.connection
+        self.context = context
 
-        # Randomly generate basis and value of qubits
+        # Randomly generate basis and value of qubitsf
         basis = np.random.choice([0, 1], KEY_LENGTH)
         value = np.random.choice([0, 1], KEY_LENGTH)
 
@@ -71,18 +67,15 @@ class Bank(AbstractNode):
 
         # Generate qubits and send to client by quantum state teleportation
         for i, (b, v) in enumerate(zip(basis, value)):
-            self.qubits[i] = Qubit(connection)
+            self.init_qubit(i)
             if v:
                 self.qubits[i].X()
             if b:
                 self.qubits[i].H()
-            yield from connection.flush()
-
-            yield from self.teleport_data_send(
-                self.qubits[i], self.client, context, connection)
+            yield from self.teleport_data_send(self.qubits[i], self.client)
 
         # Wait for merchant, receive CID, k and MID
-        csocket_merchant = context.csockets[self.merchant]
+        csocket_merchant = self.csockets[self.merchant]
         msg = yield from csocket_merchant.recv()
         client_id, measured_value, merchant_id = msg.split(",")
 
@@ -90,7 +83,7 @@ class Bank(AbstractNode):
         hmac = generate_hmac(
             CLIENT_SHARED_SECRET[client_id].encode('ascii'),
             merchant_id.encode('ascii')
-        )
+            )
 
         # Truncate HMAC to required number of qubits and use it as basis
         if len(hmac) > KEY_LENGTH:
@@ -103,7 +96,8 @@ class Bank(AbstractNode):
         # Compare the result of the measurements from the client with the state generated
         measured_basis = "".join(str(r) for r in measured_basis)
         coincidences =  np.array([
-            (b1 == b2) for b1, b2 in zip(measured_basis, original_basis)])
+            (b1 == b2) for b1, b2 in zip(measured_basis, original_basis)]
+            )
 
         print(f"Basis bank:\t{original_basis}")
         print(f"Basis client:\t{measured_basis}")
@@ -137,7 +131,7 @@ class Bank(AbstractNode):
 
 class Client(AbstractNode):
     """ Implements functionality of Client in quantum secure payment protocol
-    
+
     Parameters:
     - merchant: str -> To whom the client performs payment
     - shared_secret: str -> a shared secret known only to the bank and the client
@@ -149,19 +143,17 @@ class Client(AbstractNode):
         self.shared_secret = shared_secret
 
     def run(self, context: ProgramContext):
-        connection = context.connection
+        self.context = context
 
         # Receive qubits from bank by quantum state teleportation
         for i in range(KEY_LENGTH):
-            self.qubits[i] = yield from self.teleport_data_recv(
-                "Bank", context, connection
-                )
+            self.qubits[i] = yield from self.teleport_data_recv("Bank")
 
         # Generate HMAC SHA-256 with shared secret C and MID
         hmac = generate_hmac(
             self.shared_secret.encode('ascii'),
             MERCHANT_IDS[self.merchant].encode('ascii')
-        )
+            )
 
         # Truncate HMAC to required number of qubits and use it as basis
         if len(hmac) > KEY_LENGTH:
@@ -177,13 +169,13 @@ class Client(AbstractNode):
             if int(b):
                 self.qubits[i].H()
             res = self.qubits[i].measure()
-            yield from connection.flush()
+            yield from self.flush()
             result[i] = res
 
 
         # Send CID and k to merchant
         result = "".join(str(r) for r in result)
-        csocket = context.csockets[self.merchant]
+        csocket = self.csockets[self.merchant]
         msg = f"{CLIENT_IDS[self.name]},{result}"
         csocket.send(msg)
 
@@ -191,8 +183,8 @@ class Client(AbstractNode):
 
 
 class Merchant(AbstractNode):
-    """ Implements functionality of Client in quantum secure payment protocol
-    
+    """ Implements functionality of Merchant in quantum secure payment protocol
+
     Parameters:
     - client: str -> Who performs the payment
     """
@@ -202,17 +194,17 @@ class Merchant(AbstractNode):
         self.client = client
 
     def run(self, context: ProgramContext):
-        connection = context.connection
+        self.context = context
 
         # Communicate with client to receive CID and k
-        csocket_client = context.csockets[self.client]
+        csocket_client = self.csockets[self.client]
         msg = yield from csocket_client.recv()
 
         # Append MID and send information to bank
         msg += f",{MERCHANT_IDS[self.name]}"
-        csocket_bank = context.csockets["Bank"]
+        csocket_bank = self.csockets["Bank"]
         csocket_bank.send(msg)
-        yield from connection.flush()
+        yield from self.flush()
 
         # Wait for confirmation from bank and print it
         msg = yield from csocket_bank.recv()
@@ -223,7 +215,7 @@ class Merchant(AbstractNode):
 
 if __name__ == "__main__":
     global KEY_LENGTH, CLIENT_IDS, MERCHANT_IDS, THRESHOLD_REJECT
-    num_shots = 1
+    num_shots = 10
     KEY_LENGTH = 128
     THRESHOLD_REJECT = 0.05
 
@@ -235,12 +227,15 @@ if __name__ == "__main__":
 
     # Randomly generate 
     MERCHANT_IDS = {
-        n: ("".join(i for i in np.random.choice(['0', '1'], 128))) for n in merchants}
+        n: ("".join(i for i in np.random.choice(['0', '1'], 128))) for n in merchants
+        }
     CLIENT_IDS = {
-        n: ("".join(i for i in np.random.choice(['0', '1'], 128))) for n in clients}
+        n: ("".join(i for i in np.random.choice(['0', '1'], 128))) for n in clients
+        }
     CLIENT_SHARED_SECRET = {
         CLIENT_IDS[n]: ("".join(i for i in np.random.choice(['0', '1'], KEY_LENGTH)))
-        for n in CLIENT_IDS.keys()}
+        for n in CLIENT_IDS.keys()
+        }
 
     node_names = ["Bank", chosen_client, chosen_merchant]
 
@@ -251,7 +246,7 @@ if __name__ == "__main__":
         clink_typ="default",
         clink_cfg=DefaultCLinkConfig(delay=100),
         qdevice_cfg=GenericQDeviceConfig.perfect_config(num_qubits=KEY_LENGTH),
-    )
+        )
 
     programs = {
         "Bank": Bank(
